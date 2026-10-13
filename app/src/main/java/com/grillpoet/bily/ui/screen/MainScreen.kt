@@ -1,0 +1,671 @@
+@file:OptIn(ExperimentalFoundationApi::class)
+
+package com.grillpoet.bily.ui.screen
+
+import android.content.Context
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.grillpoet.bily.ui.icon.AppIcons
+import com.grillpoet.bily.ui.vm.MainUiState
+import com.grillpoet.bily.ui.vm.MainViewModel
+import com.grillpoet.bily.ui.widget.RoundIconButton
+import com.grillpoet.bily.ui.widget.StateType
+import com.grillpoet.bily.ui.widget.StateView
+import com.grillpoet.bily.ui.widget.VideoCardView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.InputStream
+import java.io.OutputStream
+import java.nio.charset.StandardCharsets
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+@Composable
+fun MainScreen(
+    modifier: Modifier = Modifier,
+    viewModel: MainViewModel,
+    onSearchClick: () -> Unit = {},
+    onVideoClick: (String) -> Unit = {}
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+
+    // 内部状态优先：多选 > 收藏夹详情 > 交给 AppRoot
+    BackHandler(enabled = state.hasInternalBack) {
+        when {
+            state.selectFolderMode -> viewModel.exitFolderSelectMode()
+            state.selectVideoMode -> viewModel.exitVideoSelectMode()
+            state.currentFolderId != null -> viewModel.exitFolder()
+        }
+    }
+
+    if (state.currentFolderId == null) {
+        FolderListView(
+            modifier = modifier,
+            state = state,
+            viewModel = viewModel,
+            onSearchClick = onSearchClick
+        )
+    } else {
+        FolderDetailView(
+            modifier = modifier,
+            state = state,
+            viewModel = viewModel,
+            onVideoClick = onVideoClick
+        )
+    }
+
+    val context = LocalContext.current
+    val message = state.message
+    LaunchedEffect(message) {
+        if (message != null) {
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            viewModel.consumeMessage()
+        }
+    }
+}
+
+// ==================== 收藏夹列表 ====================
+
+@Composable
+private fun FolderListView(
+    modifier: Modifier,
+    state: MainUiState,
+    viewModel: MainViewModel,
+    onSearchClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    var showCreateDialog by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val json = viewModel.exportJson()
+                writeTextToUri(context, uri, json)
+            }
+        }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) pendingImportUri = uri }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(MaterialTheme.shapes.large)
+                    .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.06f))
+                    .clickable(onClick = onSearchClick)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Search,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = "搜索视频",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f)
+                )
+            }
+
+            Spacer(Modifier.width(6.dp))
+
+            RoundIconButton(
+                icon = AppIcons.FileUpload,
+                contentDescription = "导出",
+                onClick = {
+                    if (state.folders.isNotEmpty()) exportLauncher.launch(defaultFileName())
+                }
+            )
+            RoundIconButton(
+                icon = AppIcons.FileDownload,
+                contentDescription = "导入",
+                onClick = {
+                    importLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                }
+            )
+        }
+
+        if (state.selectFolderMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RoundIconButton(
+                    icon = Icons.Rounded.Close,
+                    contentDescription = "退出多选",
+                    onClick = { viewModel.exitFolderSelectMode() }
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "已选 ${state.selectedFolderIds.size} 项",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f)
+                )
+                val all = state.selectedFolderIds.size == state.folders.size &&
+                        state.folders.isNotEmpty()
+                TextButton(onClick = { viewModel.toggleSelectAllFolders() }) {
+                    Text(if (all) "取消全选" else "全选")
+                }
+                TextButton(
+                    onClick = { showDeleteConfirm = true },
+                    enabled = state.selectedFolderIds.isNotEmpty()
+                ) {
+                    Text(
+                        text = "删除",
+                        color = if (state.selectedFolderIds.isNotEmpty())
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)
+                    )
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = buildString {
+                        append("收藏夹")
+                        if (state.folders.isNotEmpty()) append(" (${state.folders.size})")
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { showCreateDialog = true }) {
+                    Text("新建")
+                }
+            }
+        }
+
+        if (state.folders.isEmpty()) {
+            StateView(
+                type = StateType.Empty,
+                icon = AppIcons.StarBorder,
+                title = "还没有收藏夹",
+                subtitle = "点“新建”开始"
+            )
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                contentPadding = PaddingValues(
+                    start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(state.folders, key = { it.id }) { folder ->
+                    FolderCard(
+                        name = folder.name,
+                        count = folder.items.size,
+                        selectMode = state.selectFolderMode,
+                        selected = folder.id in state.selectedFolderIds,
+                        onClick = {
+                            if (state.selectFolderMode) viewModel.toggleSelectFolder(folder.id)
+                            else viewModel.enterFolder(folder.id)
+                        },
+                        onLongClick = {
+                            if (!state.selectFolderMode) viewModel.enterFolderSelectMode(folder.id)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    if (showCreateDialog) {
+        CreateFolderDialog(
+            onConfirm = { name ->
+                viewModel.createFolder(name)
+                showCreateDialog = false
+            },
+            onDismiss = { showCreateDialog = false }
+        )
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = {
+                Text(
+                    text = "删除 ${state.selectedFolderIds.size} 个收藏夹？",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteSelectedFolders()
+                    showDeleteConfirm = false
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+
+    val importUri = pendingImportUri
+    if (importUri != null) {
+        AlertDialog(
+            onDismissRequest = { pendingImportUri = null },
+            title = {
+                Text(
+                    text = "导入方式",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            text = {
+                Column {
+                    TextButton(onClick = {
+                        scope.launch {
+                            readTextFromUri(context, importUri)?.let {
+                                viewModel.importJson(it, replace = false)
+                            }
+                        }
+                        pendingImportUri = null
+                    }) {
+                        Text("合并到现有收藏", modifier = Modifier.fillMaxWidth())
+                    }
+                    TextButton(onClick = {
+                        scope.launch {
+                            readTextFromUri(context, importUri)?.let {
+                                viewModel.importJson(it, replace = true)
+                            }
+                        }
+                        pendingImportUri = null
+                    }) {
+                        Text("覆盖现有收藏", modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { pendingImportUri = null }) { Text("取消") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun FolderCard(
+    name: String,
+    count: Int,
+    selectMode: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .then(
+                if (selectMode && selected)
+                    Modifier.background(
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                        RoundedCornerShape(12.dp)
+                    )
+                else Modifier
+            )
+            .clickable(onClick = onClick)
+            .then(
+                if (onLongClick != null)
+                    Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                else Modifier.clickable(onClick = onClick)
+            )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.06f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = AppIcons.VideoLibrary,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f),
+                modifier = Modifier.size(40.dp)
+            )
+            if (selectMode) {
+                com.grillpoet.bily.ui.widget.SelectCheck(
+                    selected = selected,
+                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = name,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 2.dp)
+        )
+        Text(
+            text = "$count 个视频",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+            modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp)
+        )
+    }
+}
+
+// ==================== 收藏夹详情 ====================
+
+@Composable
+private fun FolderDetailView(
+    modifier: Modifier,
+    state: MainUiState,
+    viewModel: MainViewModel,
+    onVideoClick: (String) -> Unit
+) {
+    val folder = state.currentFolder
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RoundIconButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = {
+                    if (state.selectVideoMode) viewModel.exitVideoSelectMode()
+                    else viewModel.exitFolder()
+                }
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = folder?.name ?: "收藏夹",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (!state.selectVideoMode && folder != null && folder.items.isNotEmpty()) {
+                TextButton(onClick = {
+                    viewModel.enterVideoSelectMode(folder.items.first().bvid)
+                }) {
+                    Text("选择")
+                }
+            }
+        }
+
+        if (state.selectVideoMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "已选 ${state.selectedBvids.size} 项",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f)
+                )
+                val all = folder != null &&
+                        state.selectedBvids.size == folder.items.size &&
+                        folder.items.isNotEmpty()
+                TextButton(onClick = { viewModel.toggleSelectAllVideos() }) {
+                    Text(if (all) "取消全选" else "全选")
+                }
+                TextButton(
+                    onClick = { showDeleteConfirm = true },
+                    enabled = state.selectedBvids.isNotEmpty()
+                ) {
+                    Text(
+                        text = "移除",
+                        color = if (state.selectedBvids.isNotEmpty())
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)
+                    )
+                }
+            }
+        }
+
+        if (folder == null || folder.items.isEmpty()) {
+            StateView(
+                type = StateType.Empty,
+                icon = AppIcons.VideoLibrary,
+                title = "这个收藏夹还没有视频"
+            )
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                contentPadding = PaddingValues(
+                    start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(folder.items, key = { it.bvid }) { item ->
+                    val bvid = item.bvid
+                    LaunchedEffect(bvid) { viewModel.ensureVideoCard(bvid) }
+
+                    val card = state.videoCards[bvid]
+                    val selectMode = state.selectVideoMode
+                    val selected = bvid in state.selectedBvids
+
+                    if (card != null) {
+                        VideoCardView(
+                            video = card,
+                            selectMode = selectMode,
+                            selected = selected,
+                            onClick = {
+                                if (selectMode) viewModel.toggleSelectVideo(bvid)
+                                else onVideoClick(bvid)
+                            },
+                            onLongClick = {
+                                if (!selectMode) viewModel.enterVideoSelectMode(bvid)
+                            }
+                        )
+                    } else {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        MaterialTheme.colorScheme.onBackground.copy(alpha = 0.06f)
+                                    )
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.8f)
+                                    .height(14.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(
+                                        MaterialTheme.colorScheme.onBackground.copy(alpha = 0.06f)
+                                    )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = {
+                Text(
+                    text = "移除 ${state.selectedBvids.size} 个视频？",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteSelectedVideos()
+                    showDeleteConfirm = false
+                }) { Text("移除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+// ==================== 对话框 ====================
+
+@Composable
+private fun CreateFolderDialog(
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "新建收藏夹",
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                label = { Text("名称") },
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { if (name.isNotBlank()) onConfirm(name.trim()) },
+                enabled = name.isNotBlank()
+            ) { Text("创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+// ==================== 工具 ====================
+
+private fun defaultFileName(): String {
+    val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+    return "bily_fav_${sdf.format(Date())}.json"
+}
+
+private suspend fun readTextFromUri(context: Context, uri: Uri): String? =
+    withContext(Dispatchers.IO) {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input: InputStream ->
+                input.readBytes().toString(StandardCharsets.UTF_8)
+            }
+        } catch (_: Exception) { null }
+    }
+
+private suspend fun writeTextToUri(context: Context, uri: Uri, text: String) =
+    withContext(Dispatchers.IO) {
+        try {
+            context.contentResolver.openOutputStream(uri)?.use { output: OutputStream ->
+                output.write(text.toByteArray(StandardCharsets.UTF_8))
+                output.flush()
+            }
+        } catch (_: Exception) {}
+    }

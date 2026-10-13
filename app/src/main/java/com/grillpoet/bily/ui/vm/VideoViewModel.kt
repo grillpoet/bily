@@ -1,0 +1,290 @@
+package com.grillpoet.bily.ui.vm
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.grillpoet.bily.data.BiliRepository
+import com.grillpoet.bily.data.Downloader
+import com.grillpoet.bily.data.FavoriteFolder
+import com.grillpoet.bily.data.FavoriteStore
+import com.grillpoet.bily.data.PlaySource
+import com.grillpoet.bily.data.VideoCard
+import com.grillpoet.bily.data.VideoDetail
+import com.grillpoet.bily.data.qualityLabel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+data class VideoUiState(
+    val detail: VideoDetail? = null,
+    val currentPageIndex: Int = 1,
+    val currentCid: Long = 0,
+    val currentQn: Int = 64,
+    val qualityName: String = "720P",
+    val source: PlaySource? = null,
+    val currentStreamIndex: Int = 0,
+    val loadingDetail: Boolean = true,
+    val loadingPlay: Boolean = false,
+    val error: String? = null,
+    val related: List<VideoCard> = emptyList(),
+    val folders: List<FavoriteFolder> = emptyList(),
+    val favoritedFolderId: String? = null,
+    val titleExpanded: Boolean = false,
+    val message: String? = null
+) {
+    val currentStreamUrl: String?
+        get() = source?.streams?.getOrNull(currentStreamIndex)?.url
+}
+
+class VideoViewModel(
+    private val repo: BiliRepository,
+    private val favoriteStore: FavoriteStore,
+    private val downloader: Downloader
+) : ViewModel() {
+
+    private val _state = MutableStateFlow(VideoUiState())
+    val state: StateFlow<VideoUiState> = _state.asStateFlow()
+
+    private var bvid: String = ""
+    private var favoriteJob: Job? = null
+    private var playJob: Job? = null
+
+    fun init(bvid: String) {
+        if (this.bvid == bvid) return
+        this.bvid = bvid
+        loadDetail()
+        loadRelated()
+        observeFavorite()
+    }
+
+    fun toggleTitleExpand() {
+        _state.update { it.copy(titleExpanded = !it.titleExpanded) }
+    }
+
+    private fun loadDetail() {
+        viewModelScope.launch {
+            _state.update { it.copy(loadingDetail = true, error = null) }
+            repo.getDetail(bvid)
+                .onSuccess { detail ->
+                    this@VideoViewModel.bvid = detail.bvid
+                    val firstPage = detail.pages.firstOrNull()
+                    if (firstPage == null) {
+                        _state.update {
+                            it.copy(loadingDetail = false, error = "视频无可用分P")
+                        }
+                        return@onSuccess
+                    }
+                    _state.update {
+                        it.copy(
+                            detail = detail,
+                            currentPageIndex = firstPage.index,
+                            currentCid = firstPage.cid,
+                            loadingDetail = false
+                        )
+                    }
+                    loadPlay(firstPage.cid, _state.value.currentQn)
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(loadingDetail = false, error = e.message ?: "加载失败")
+                    }
+                }
+        }
+    }
+
+    private fun loadPlay(cid: Long, qn: Int) {
+        playJob?.cancel()
+        playJob = viewModelScope.launch {
+            _state.update { it.copy(loadingPlay = true, error = null) }
+            repo.getPlaySource(bvid, cid, qn)
+                .onSuccess { source ->
+                    _state.update {
+                        it.copy(
+                            source = source,
+                            currentStreamIndex = 0,
+                            currentCid = cid,
+                            currentQn = qn,
+                            qualityName = qualityLabel(source.quality),
+                            loadingPlay = false
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    if (e is CancellationException) return@onFailure
+                    _state.update {
+                        it.copy(loadingPlay = false, error = e.message ?: "播放失败")
+                    }
+                }
+        }
+    }
+
+    fun onPlayerError() {
+        val s = _state.value
+        val source = s.source ?: return
+        val nextIndex = s.currentStreamIndex + 1
+        if (nextIndex >= source.streams.size) {
+            _state.update { it.copy(message = "所有线路均无法播放") }
+            return
+        }
+        _state.update {
+            it.copy(
+                currentStreamIndex = nextIndex,
+                loadingPlay = true
+            )
+        }
+    }
+
+    private fun loadRelated() {
+        viewModelScope.launch {
+            repo.getRelated(bvid).onSuccess { items ->
+                _state.update { it.copy(related = items) }
+            }
+        }
+    }
+
+    private fun observeFavorite() {
+        favoriteJob?.cancel()
+        favoriteJob = viewModelScope.launch {
+            combine(
+                favoriteStore.flow,
+                _state.map { it.detail?.bvid }.distinctUntilChanged()
+            ) { folders, id ->
+                val folderId = if (id == null) null
+                else folders.firstOrNull { it.contains(id) }?.id
+                folders to folderId
+            }
+                .distinctUntilChanged()
+                .collect { (folders, folderId) ->
+                    _state.update {
+                        it.copy(
+                            folders = folders,
+                            favoritedFolderId = folderId
+                        )
+                    }
+                }
+        }
+    }
+
+    fun selectPage(index: Int) {
+        val detail = _state.value.detail ?: return
+        val page = detail.pages.firstOrNull { it.index == index } ?: return
+        if (page.index == _state.value.currentPageIndex) return
+        _state.update {
+            it.copy(
+                currentPageIndex = page.index,
+                currentCid = page.cid
+            )
+        }
+        loadPlay(page.cid, _state.value.currentQn)
+    }
+
+    fun selectQuality(qn: Int) {
+        if (qn == _state.value.currentQn || _state.value.loadingPlay) return
+        loadPlay(_state.value.currentCid, qn)
+    }
+
+    fun toggleQuality() {
+        if (_state.value.loadingPlay) return
+        selectQuality(if (_state.value.currentQn == 64) 16 else 64)
+    }
+
+    fun favoriteTo(folderId: String) {
+        val id = _state.value.detail?.bvid ?: return
+        viewModelScope.launch {
+            val ok = favoriteStore.addToFolder(folderId, id)
+            _state.update {
+                it.copy(message = if (ok) "已收藏" else "收藏失败")
+            }
+        }
+    }
+
+    fun favoriteToNewFolder(name: String) {
+        val id = _state.value.detail?.bvid ?: return
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val folder = favoriteStore.createFolder(trimmed)
+            if (folder == null) {
+                _state.update { it.copy(message = "同名文件夹已存在") }
+                return@launch
+            }
+            favoriteStore.addToFolder(folder.id, id)
+            _state.update { it.copy(message = "已收藏到「${folder.name}」") }
+        }
+    }
+
+    fun unfavorite() {
+        val id = _state.value.detail?.bvid ?: return
+        viewModelScope.launch {
+            favoriteStore.removeFromAll(id)
+            _state.update { it.copy(message = "已取消收藏") }
+        }
+    }
+
+    fun onPlaybackEnded() {
+        val s = _state.value
+        val detail = s.detail ?: return
+        val idx = detail.pages.indexOfFirst { it.index == s.currentPageIndex }
+        if (idx < 0 || idx >= detail.pages.size - 1) return
+        val next = detail.pages[idx + 1]
+        _state.update {
+            it.copy(
+                currentPageIndex = next.index,
+                currentCid = next.cid
+            )
+        }
+        loadPlay(next.cid, s.currentQn)
+    }
+
+    fun download(qn: Int) {
+        val s = _state.value
+        val detail = s.detail ?: return
+        if (s.currentCid <= 0) return
+
+        val currentPage = detail.pages.firstOrNull { it.index == s.currentPageIndex }
+
+        viewModelScope.launch {
+            val name = qualityLabel(qn)
+            _state.update { it.copy(message = "准备下载…") }
+            repo.getPlaySource(bvid, s.currentCid, qn)
+                .onSuccess { source ->
+                    val url = downloader.findAvailableUrl(source.streams)
+                    if (url == null) {
+                        _state.update { it.copy(message = "所有线路均不可用") }
+                        return@onSuccess
+                    }
+                    try {
+                        downloader.enqueue(
+                            bvid = bvid,
+                            title = detail.title,
+                            partName = currentPage?.part.orEmpty(),
+                            partIndex = currentPage?.index ?: 1,
+                            totalPages = detail.pages.size,
+                            url = url,
+                            qnName = name
+                        )
+                        _state.update { it.copy(message = "已加入下载 · $name") }
+                    } catch (e: Exception) {
+                        _state.update {
+                            it.copy(message = "下载失败：${e.message ?: "未知错误"}")
+                        }
+                    }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(message = "下载失败：${e.message ?: "未知错误"}")
+                    }
+                }
+        }
+    }
+
+    fun consumeMessage() {
+        _state.update { it.copy(message = null) }
+    }
+}

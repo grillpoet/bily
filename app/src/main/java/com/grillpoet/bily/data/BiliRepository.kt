@@ -1,0 +1,188 @@
+package com.grillpoet.bily.data
+
+import com.grillpoet.bily.core.DurationUtils
+import com.grillpoet.bily.data.api.BiliApi
+import com.grillpoet.bily.data.api.RelatedItemDto
+import com.grillpoet.bily.data.api.SearchItemDto
+import com.grillpoet.bily.data.api.SpaceDataDtoApp
+import com.grillpoet.bily.data.api.VideoInfoDto
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+private val HTML_TAG_REGEX = Regex("<[^>]+>")
+
+class BiliRepository(private val api: BiliApi) {
+
+    // ==================== 搜索 ====================
+
+    data class SearchPageResult(
+        val items: List<VideoCard>,
+        val currentPage: Int,
+        val totalPages: Int
+    )
+
+    suspend fun search(
+        keyword: String,
+        page: Int,
+        pageSize: Int = 20
+    ): Result<SearchPageResult> = runCatching {
+        withContext(Dispatchers.IO) {
+            val dto = api.searchVideos(keyword, page, pageSize)
+            SearchPageResult(
+                items = dto.result.map { it.toCard() }.distinctBy { it.bvid },
+                currentPage = page,
+                totalPages = dto.numPages.coerceAtLeast(1)
+            )
+        }
+    }
+
+    // ==================== 空间 ====================
+
+    data class SpacePageResult(
+        val items: List<VideoCard>,
+        val currentPage: Int,
+        val hasNext: Boolean
+    )
+
+    private val cursorCache = object :
+        LinkedHashMap<Pair<Long, String>, MutableMap<Int, Long>>(20, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<Pair<Long, String>, MutableMap<Int, Long>>
+        ): Boolean = size > 20
+    }
+
+    suspend fun getSpaceVideos(
+        mid: Long,
+        page: Int,
+        pageSize: Int = 20,
+        order: String = "pubdate"
+    ): Result<SpacePageResult> = runCatching {
+        withContext(Dispatchers.IO) {
+            val key = mid to order
+            val cursors = cursorCache.getOrPut(key) { mutableMapOf() }
+            val cursor = if (page <= 1) null else cursors[page - 1]
+
+            val dto = api.getSpaceVideosApp(
+                mid = mid, cursor = cursor, order = order, ps = pageSize
+            )
+            val rawItems = dto.item
+            val items = rawItems.map { it.toCard() }.distinctBy { it.bvid }
+            rawItems.lastOrNull()?.param?.toLongOrNull()?.let { cursors[page] = it }
+
+            SpacePageResult(
+                items = items,
+                currentPage = page,
+                hasNext = dto.hasNext && items.isNotEmpty()
+            )
+        }
+    }
+
+    fun clearSpaceCursor(mid: Long, order: String = "pubdate") {
+        cursorCache.remove(mid to order)
+    }
+
+    // ==================== 视频 ====================
+
+    private val detailCache = object :
+        LinkedHashMap<String, Pair<Long, VideoDetail>>(20, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, Pair<Long, VideoDetail>>
+        ): Boolean = size > 20
+    }
+
+    suspend fun getDetail(bvid: String): Result<VideoDetail> = runCatching {
+        withContext(Dispatchers.IO) {
+            val cached = detailCache[bvid]
+            if (cached != null && System.currentTimeMillis() - cached.first < 5 * 60 * 1000L) {
+                return@withContext cached.second
+            }
+            val detail = api.getVideoInfo(bvid).toDomain()
+            detailCache[bvid] = System.currentTimeMillis() to detail
+            detail
+        }
+    }
+
+    suspend fun getRelated(bvid: String): Result<List<VideoCard>> = runCatching {
+        withContext(Dispatchers.IO) {
+            api.getRelated(bvid).map { it.toCard() }.distinctBy { it.bvid }
+        }
+    }
+
+    suspend fun getPlaySource(
+        bvid: String,
+        cid: Long,
+        qn: Int
+    ): Result<PlaySource> = runCatching {
+        withContext(Dispatchers.IO) {
+            val dto = api.getPlayUrlWbi(bvid, cid, qn)
+            val quality = dto.quality
+            val label = qualityLabel(quality)
+
+            val streams = dto.durl.flatMap { d ->
+                buildList {
+                    if (d.url.isNotEmpty()) {
+                        add(PlayStream(url = d.url, qn = quality, label = label, backup = false))
+                    }
+                    (d.backupUrl ?: emptyList()).forEach { u ->
+                        if (u.isNotEmpty()) {
+                            add(PlayStream(url = u, qn = quality, label = label, backup = true))
+                        }
+                    }
+                }
+            }.distinctBy { it.url }
+
+            if (streams.isEmpty()) error("无可用播放地址")
+            PlaySource(streams = streams, quality = quality)
+        }
+    }
+}
+
+// ==================== DTO → domain ====================
+
+private fun VideoInfoDto.toDomain(): VideoDetail = VideoDetail(
+    bvid = bvid,
+    aid = aid,
+    title = title,
+    cover = pic,
+    owner = Owner(owner.mid, owner.name, owner.face),
+    pages = pages.map {
+        Page(
+            cid = it.cid,
+            index = it.page,
+            part = it.part.ifBlank { "P${it.page}" },
+            durationSec = it.duration
+        )
+    }
+)
+
+private fun RelatedItemDto.toCard(): VideoCard = VideoCard(
+    bvid = bvid,
+    title = title,
+    cover = pic,
+    ownerName = owner.name,
+    durationText = DurationUtils.normalize(duration.toString())
+)
+
+private fun SearchItemDto.toCard(): VideoCard = VideoCard(
+    bvid = bvid,
+    title = title.replace(HTML_TAG_REGEX, ""),
+    cover = pic,
+    ownerName = author,
+    durationText = DurationUtils.normalize(duration)
+)
+
+private fun SpaceDataDtoApp.Item.toCard(): VideoCard {
+    val aidValue = param.toLongOrNull() ?: 0L
+    return VideoCard(
+        bvid = param,
+        title = title,
+        cover = when {
+            cover.startsWith("//") -> "https:$cover"
+            cover.startsWith("http://") -> cover.replaceFirst("http://", "https://")
+            else -> cover
+        },
+        ownerName = author,
+        durationText = DurationUtils.normalize(length),
+        aid = aidValue
+    )
+}

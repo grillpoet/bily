@@ -1,0 +1,333 @@
+@file:OptIn(ExperimentalFoundationApi::class)
+
+package com.grillpoet.bily.ui.widget
+
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.grillpoet.bily.core.normalizeCover
+import com.grillpoet.bily.data.VideoCard
+
+private val BlackScrim = Color.Black.copy(alpha = 0.5f)
+private val DurationScrim = Color.Black.copy(alpha = 0.6f)
+private val WhiteIcon = Color.White
+private const val COVER_W = 400
+private const val COVER_H = 225
+
+// ==================== 按钮 ====================
+
+@Composable
+fun CircleIconButton(
+    icon: ImageVector,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 44.dp,
+    iconSize: Dp = 22.dp,
+    background: Color = Color.Transparent,
+    tint: Color = MaterialTheme.colorScheme.onBackground
+) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(background)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(iconSize)
+        )
+    }
+}
+
+@Composable
+fun RoundIconButton(
+    icon: ImageVector,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) = CircleIconButton(icon, contentDescription, onClick, modifier)
+
+@Composable
+fun SelectCheck(selected: Boolean, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(if (selected) MaterialTheme.colorScheme.primary else BlackScrim),
+        contentAlignment = Alignment.Center
+    ) {
+        if (selected) {
+            Icon(
+                Icons.Rounded.Check,
+                contentDescription = null,
+                tint = WhiteIcon,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+    }
+}
+
+// ==================== 状态 ====================
+
+enum class StateType { Loading, Empty, Error }
+
+@Composable
+fun StateView(
+    type: StateType,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    title: String = "",
+    subtitle: String? = null,
+    onRetry: (() -> Unit)? = null
+) {
+    Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        when (type) {
+            StateType.Loading -> CircularProgressIndicator(
+                color = MaterialTheme.colorScheme.onBackground,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(32.dp)
+            )
+
+            StateType.Empty -> Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(32.dp)
+            ) {
+                if (icon != null) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.2f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(16.dp))
+                }
+                if (title.isNotEmpty()) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+                if (!subtitle.isNullOrEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
+            StateType.Error -> Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(32.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center
+                )
+                if (onRetry != null) {
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = onRetry) { Text("重试") }
+                }
+            }
+        }
+    }
+}
+
+// ==================== Chip / TopBar ====================
+
+@Composable
+fun InfoChip(
+    text: String,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null
+) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onBackground,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.35f),
+                shape = RoundedCornerShape(6.dp)
+            )
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+    )
+}
+
+@Composable
+fun BackTopBar(
+    title: String,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    backIcon: ImageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+    actions: @Composable () -> Unit = {}
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RoundIconButton(icon = backIcon, contentDescription = "返回", onClick = onBack)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        actions()
+    }
+}
+
+// ==================== 视频卡片 ====================
+
+@Composable
+fun VideoCardView(
+    video: VideoCard,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    selectMode: Boolean = false,
+    selected: Boolean = false,
+    onLongClick: (() -> Unit)? = null
+) {
+    val outerModifier = modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(12.dp))
+        .then(
+            if (selectMode && selected)
+                Modifier.border(
+                    2.dp,
+                    MaterialTheme.colorScheme.primary,
+                    RoundedCornerShape(12.dp)
+                )
+            else Modifier
+        )
+        .then(
+            if (onLongClick != null)
+                Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            else Modifier.clickable(onClick = onClick)
+        )
+
+    Column(modifier = outerModifier) {
+        Box {
+            CoverBox(video)
+            if (selectMode) {
+                SelectCheck(
+                    selected = selected,
+                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = video.title,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun CoverBox(video: VideoCard) {
+    val context = LocalContext.current
+
+    val model = remember(video.cover) {
+        ImageRequest.Builder(context)
+            .data(normalizeCover(video.cover))
+            .size(COVER_W, COVER_H)
+            .crossfade(false)
+            .build()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.06f))
+    ) {
+        AsyncImage(
+            model = model,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
+        DurationBadge(video.durationText, Modifier.align(Alignment.BottomEnd))
+    }
+}
+
+@Composable
+private fun DurationBadge(text: String, modifier: Modifier = Modifier) {
+    if (text.isBlank()) return
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = Color.White,
+        modifier = modifier
+            .padding(6.dp)
+            .background(DurationScrim, RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 2.dp)
+    )
+}

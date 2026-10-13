@@ -1,0 +1,232 @@
+package com.grillpoet.bily.data.api
+
+import android.util.Log
+import com.grillpoet.bily.core.Constants
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.net.URLEncoder
+
+sealed class BiliException(message: String) : Exception(message) {
+    class RateLimited(val code: Int) :
+        BiliException("风控拦截 code=$code")
+
+    class ApiError(val code: Int, message: String) :
+        BiliException("API $code: $message")
+}
+
+class BiliApi(
+    private val client: OkHttpClient,
+    private val json: Json,
+    private val wbiKeyManager: WbiKeyManager,
+    private val buvid: Buvid
+) {
+    private companion object {
+        const val TAG = "BiliApi"
+        const val UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        const val WEB_LOCATION_SEARCH = "1430650"
+    }
+
+    private val throttle = Mutex()
+    private var lastAt = 0L
+
+    private suspend fun throttle(minMs: Long) {
+        throttle.withLock {
+            val elapsed = System.currentTimeMillis() - lastAt
+            if (elapsed < minMs) delay(minMs - elapsed)
+            lastAt = System.currentTimeMillis()
+        }
+    }
+
+    private suspend fun getRaw(
+        url: String,
+        referer: String = Constants.REFERER
+    ): String {
+        buvid.ensure()
+
+        val origin = when {
+            referer.contains("space.bilibili.com") -> "https://space.bilibili.com"
+            referer.contains("search.bilibili.com") -> "https://search.bilibili.com"
+            else -> "https://www.bilibili.com"
+        }
+
+        return withContext(Dispatchers.IO) {
+            val req = Request.Builder()
+                .url(url)
+                .header("Referer", referer)
+                .header("Origin", origin)
+                .header("User-Agent", UA)
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                .header("Connection", "keep-alive")
+                .build()
+
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) error("HTTP ${resp.code}")
+                resp.body?.string().orEmpty()
+            }
+        }
+    }
+
+    private suspend fun <T> getData(
+        url: String,
+        deserializer: DeserializationStrategy<T>,
+        referer: String = Constants.REFERER
+    ): T = withContext(Dispatchers.IO) {
+        val body = getRaw(url, referer)
+        val root = json.parseToJsonElement(body).jsonObject
+        val code = root["code"]?.jsonPrimitive?.int ?: -1
+
+        if (code != 0) {
+            val msg = root["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (code == -352 || code == -402 || code == -412 || code == -799) {
+                throw BiliException.RateLimited(code)
+            }
+            throw BiliException.ApiError(code, msg)
+        }
+
+        val dataNode = root["data"]
+        if (dataNode is JsonObject && dataNode.size == 1) {
+            val voucher = dataNode["v_voucher"]?.jsonPrimitive?.contentOrNull
+            if (voucher != null) throw BiliException.RateLimited(0)
+        }
+
+        val data = dataNode ?: throw BiliException.ApiError(-1, "响应无 data")
+        json.decodeFromJsonElement(deserializer, data)
+    }
+
+    suspend fun getVideoInfo(id: String): VideoInfoDto {
+        throttle(200L)
+        val query = if (id.all { it.isDigit() }) "aid=$id" else "bvid=$id"
+        return getData(
+            url = "${Constants.API_BASE}/x/web-interface/view?$query",
+            deserializer = VideoInfoDto.serializer(),
+            referer = "https://www.bilibili.com/video/$id"
+        )
+    }
+
+    suspend fun getRelated(id: String): List<RelatedItemDto> = withContext(Dispatchers.IO) {
+        throttle(200L)
+        val query = if (id.all { it.isDigit() }) "aid=$id" else "bvid=$id"
+        val url = "${Constants.API_BASE}/x/web-interface/archive/related?$query"
+        val root = json.parseToJsonElement(
+            getRaw(url, "https://www.bilibili.com/video/$id")
+        ).jsonObject
+        val code = root["code"]?.jsonPrimitive?.int ?: -1
+        if (code != 0) throw BiliException.ApiError(code, "相关推荐失败")
+        val data: JsonElement = root["data"] ?: return@withContext emptyList()
+        if (data is JsonNull) return@withContext emptyList()
+        runCatching {
+            json.decodeFromJsonElement(
+                ListSerializer(RelatedItemDto.serializer()),
+                data
+            )
+        }.getOrElse {
+            Log.e(TAG, "related decode failed", it)
+            emptyList()
+        }
+    }
+
+    /**
+     * 走 WBI 签名的 playurl，返回 durl + backup_url。
+     */
+    suspend fun getPlayUrlWbi(
+        bvid: String,
+        cid: Long,
+        qn: Int,
+        fnval: Int = 1,
+        fnver: Int = 0,
+        fourk: Int = 1
+    ): PlayUrlDto = withContext(Dispatchers.IO) {
+        throttle(200L)
+        val (img, sub) = wbiKeyManager.ensure()
+        val params = mapOf(
+            "bvid" to bvid,
+            "cid" to cid.toString(),
+            "qn" to qn.toString(),
+            "fnval" to fnval.toString(),
+            "fnver" to fnver.toString(),
+            "fourk" to fourk.toString(),
+            "platform" to "html5",
+            "high_quality" to "1",
+            "try_look" to "1"
+        )
+        val query = Wbi.sign(params, img, sub)
+        getData(
+            url = "${Constants.API_BASE}/x/player/wbi/playurl?$query",
+            deserializer = PlayUrlDto.serializer(),
+            referer = "https://www.bilibili.com/video/$bvid"
+        )
+    }
+
+    suspend fun searchVideos(
+        keyword: String,
+        page: Int,
+        pageSize: Int = 20
+    ): SearchDataDto = withContext(Dispatchers.IO) {
+        throttle(500L)
+        val (img, sub) = wbiKeyManager.ensure()
+        val params = mapOf(
+            "keyword" to keyword,
+            "page" to page.toString(),
+            "page_size" to pageSize.toString(),
+            "order" to "totalrank",
+            "search_type" to "video",
+            "web_location" to WEB_LOCATION_SEARCH,
+            "platform" to "pc"
+        )
+        val query = Wbi.sign(params, img, sub)
+        val encodedKeyword = URLEncoder.encode(keyword, "UTF-8")
+
+        getData(
+            url = "${Constants.API_BASE}/x/web-interface/wbi/search/type?$query",
+            deserializer = SearchDataDto.serializer(),
+            referer = "https://search.bilibili.com/all?keyword=$encodedKeyword"
+        )
+    }
+
+    suspend fun getSpaceVideosApp(
+        mid: Long,
+        cursor: Long? = null,
+        order: String = "pubdate",
+        ps: Int = 20
+    ): SpaceDataDtoApp = withContext(Dispatchers.IO) {
+        throttle(500L)
+
+        val params = mutableMapOf(
+            "vmid" to mid.toString(),
+            "order" to order,
+            "ps" to ps.toString(),
+            "build" to "8130300",
+            "mobi_app" to "android",
+            "platform" to "android",
+            "ts" to (System.currentTimeMillis() / 1000).toString()
+        )
+        cursor?.let { params["aid"] = it.toString() }
+
+        val query = AppSigner.sign(params)
+        val url = "${Constants.APP_API_BASE}/x/v2/space/archive/cursor?$query"
+
+        getData(
+            url = url,
+            deserializer = SpaceDataDtoApp.serializer(),
+            referer = "https://space.bilibili.com/$mid"
+        )
+    }
+}

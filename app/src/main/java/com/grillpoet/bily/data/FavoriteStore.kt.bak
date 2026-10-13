@@ -1,0 +1,100 @@
+package com.grillpoet.bily.data
+
+import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+private val Context.favoriteDataStore: DataStore<Preferences>
+        by preferencesDataStore(name = "favorite_store")
+
+class FavoriteStore(
+    context: Context,
+    private val json: Json
+) {
+    private val dataStore = context.favoriteDataStore
+    private val key = stringPreferencesKey("items")
+
+    val flow: Flow<List<Favorite>> = dataStore.data.map { decode(it[key]) }
+
+    suspend fun list(): List<Favorite> = flow.first()
+
+    suspend fun add(fav: Favorite) {
+        dataStore.edit { prefs ->
+            val current = decode(prefs[key])
+            val next = buildList {
+                add(fav)
+                addAll(current.filter { it.bvid != fav.bvid })
+            }
+            prefs[key] = json.encodeToString(next)
+        }
+    }
+
+    suspend fun remove(bvid: String) {
+        dataStore.edit { prefs ->
+            prefs[key] = json.encodeToString(
+                decode(prefs[key]).filterNot { it.bvid == bvid }
+            )
+        }
+    }
+
+    suspend fun toggle(fav: Favorite): Boolean {
+        val isFav = list().any { it.bvid == fav.bvid }
+        return if (isFav) { remove(fav.bvid); false } else { add(fav); true }
+    }
+
+    suspend fun removeAll(bvids: Collection<String>) {
+        if (bvids.isEmpty()) return
+        val set = bvids.toHashSet()
+        dataStore.edit { prefs ->
+            prefs[key] = json.encodeToString(
+                decode(prefs[key]).filterNot { it.bvid in set }
+            )
+        }
+    }
+
+    suspend fun exportJson(): String = json.encodeToString(
+        FavoriteBackup(items = list())
+    )
+
+    suspend fun importJson(text: String, replace: Boolean): ImportResult {
+        // 导入的 bvid 先整体去重，避免写入重复项导致 LazyGrid key 冲突
+        val incoming = parseBackup(text).distinctBy { it.bvid }
+        if (replace) {
+            dataStore.edit { it[key] = json.encodeToString(incoming) }
+            return ImportResult(incoming.size, incoming.size)
+        }
+        var added = 0
+        dataStore.edit { prefs ->
+            val existing = decode(prefs[key])
+            val existingMap = existing.associateBy { it.bvid }
+            val merged = mutableListOf<Favorite>()
+            val handled = mutableSetOf<String>()
+            for (item in incoming) {
+                if (!existingMap.containsKey(item.bvid)) added++
+                merged.add(item); handled.add(item.bvid)
+            }
+            for (item in existing) if (item.bvid !in handled) merged.add(item)
+            prefs[key] = json.encodeToString(merged)
+        }
+        return ImportResult(incoming.size, added)
+    }
+
+    private fun decode(raw: String?): List<Favorite> {
+        if (raw.isNullOrEmpty()) return emptyList()
+        return try { json.decodeFromString(raw) } catch (_: Exception) { emptyList() }
+    }
+
+    private fun parseBackup(text: String): List<Favorite> {
+        runCatching { return json.decodeFromString<FavoriteBackup>(text).items }
+        runCatching { return json.decodeFromString<List<Favorite>>(text) }
+        throw IllegalArgumentException("文件格式不正确")
+    }
+}

@@ -1,0 +1,221 @@
+package com.grillpoet.bily.ui.vm
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.grillpoet.bily.data.BiliRepository
+import com.grillpoet.bily.data.FavoriteFolder
+import com.grillpoet.bily.data.FavoriteStore
+import com.grillpoet.bily.data.ImportResult
+import com.grillpoet.bily.data.VideoCard
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+data class MainUiState(
+    val folders: List<FavoriteFolder> = emptyList(),
+    val currentFolderId: String? = null,
+    val selectFolderMode: Boolean = false,
+    val selectedFolderIds: Set<String> = emptySet(),
+    val selectVideoMode: Boolean = false,
+    val selectedBvids: Set<String> = emptySet(),
+    val videoCards: Map<String, VideoCard> = emptyMap(),
+    val message: String? = null
+) {
+    val currentFolder: FavoriteFolder?
+        get() = folders.firstOrNull { it.id == currentFolderId }
+}
+
+class MainViewModel(
+    private val favoriteStore: FavoriteStore,
+    private val repo: BiliRepository
+) : ViewModel() {
+
+    private val _state = MutableStateFlow(MainUiState())
+    val state: StateFlow<MainUiState> = _state.asStateFlow()
+
+    private val loadingBvids = mutableSetOf<String>()
+
+    init {
+        viewModelScope.launch {
+            favoriteStore.flow.collect { list ->
+                _state.update { s ->
+                    val stillThere = list.any { it.id == s.currentFolderId }
+                    s.copy(
+                        folders = list,
+                        currentFolderId = if (stillThere) s.currentFolderId else null
+                    )
+                }
+            }
+        }
+    }
+
+    fun createFolder(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val folder = favoriteStore.createFolder(trimmed)
+            _state.update {
+                it.copy(
+                    message = if (folder != null) "已创建「${folder.name}」"
+                    else "同名文件夹已存在"
+                )
+            }
+        }
+    }
+
+    fun enterFolder(id: String) {
+        _state.update {
+            it.copy(
+                currentFolderId = id,
+                selectVideoMode = false,
+                selectedBvids = emptySet()
+            )
+        }
+    }
+
+    fun exitFolder() {
+        _state.update {
+            it.copy(
+                currentFolderId = null,
+                selectVideoMode = false,
+                selectedBvids = emptySet()
+            )
+        }
+    }
+
+    fun enterFolderSelectMode(id: String) {
+        _state.update {
+            it.copy(selectFolderMode = true, selectedFolderIds = setOf(id))
+        }
+    }
+
+    fun exitFolderSelectMode() {
+        _state.update {
+            it.copy(selectFolderMode = false, selectedFolderIds = emptySet())
+        }
+    }
+
+    fun toggleSelectFolder(id: String) {
+        _state.update { s ->
+            val set = s.selectedFolderIds.toMutableSet()
+            if (!set.add(id)) set.remove(id)
+            s.copy(selectedFolderIds = set)
+        }
+    }
+
+    fun toggleSelectAllFolders() {
+        _state.update { s ->
+            val all = s.folders.map { it.id }.toSet()
+            s.copy(selectedFolderIds = if (s.selectedFolderIds.size == all.size) emptySet() else all)
+        }
+    }
+
+    fun deleteSelectedFolders() {
+        val ids = _state.value.selectedFolderIds
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            favoriteStore.deleteFolders(ids)
+            _state.update {
+                it.copy(
+                    selectFolderMode = false,
+                    selectedFolderIds = emptySet(),
+                    message = "已删除 ${ids.size} 个收藏夹"
+                )
+            }
+        }
+    }
+
+    fun enterVideoSelectMode(bvid: String) {
+        _state.update {
+            it.copy(selectVideoMode = true, selectedBvids = setOf(bvid))
+        }
+    }
+
+    fun exitVideoSelectMode() {
+        _state.update {
+            it.copy(selectVideoMode = false, selectedBvids = emptySet())
+        }
+    }
+
+    fun toggleSelectVideo(bvid: String) {
+        _state.update { s ->
+            val set = s.selectedBvids.toMutableSet()
+            if (!set.add(bvid)) set.remove(bvid)
+            s.copy(selectedBvids = set)
+        }
+    }
+
+    fun toggleSelectAllVideos() {
+        _state.update { s ->
+            val all = s.currentFolder?.items?.map { it.bvid }?.toSet() ?: emptySet()
+            s.copy(selectedBvids = if (s.selectedBvids.size == all.size) emptySet() else all)
+        }
+    }
+
+    fun deleteSelectedVideos() {
+        val s = _state.value
+        val folderId = s.currentFolderId ?: return
+        val ids = s.selectedBvids
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            favoriteStore.removeFromFolder(folderId, ids)
+            _state.update {
+                it.copy(
+                    selectVideoMode = false,
+                    selectedBvids = emptySet(),
+                    message = "已移除 ${ids.size} 个"
+                )
+            }
+        }
+    }
+
+    fun ensureVideoCard(bvid: String) {
+        if (bvid.isEmpty()) return
+        if (_state.value.videoCards.containsKey(bvid)) return
+        if (bvid in loadingBvids) return
+        loadingBvids.add(bvid)
+        viewModelScope.launch {
+            repo.getDetail(bvid).onSuccess { detail ->
+                val sec = detail.pages.firstOrNull()?.durationSec ?: 0L
+                val durText = if (sec > 0) {
+                    val h = sec / 3600
+                    val m = (sec % 3600) / 60
+                    val s = sec % 60
+                    if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+                } else ""
+                val card = VideoCard(
+                    bvid = detail.bvid,
+                    title = detail.title,
+                    cover = detail.cover,
+                    ownerName = detail.owner.name,
+                    durationText = durText
+                )
+                _state.update { it.copy(videoCards = it.videoCards + (bvid to card)) }
+            }
+            loadingBvids.remove(bvid)
+        }
+    }
+
+    suspend fun exportJson(): String = favoriteStore.exportJson()
+
+    fun importJson(text: String, replace: Boolean) {
+        viewModelScope.launch {
+            try {
+                val result: ImportResult = favoriteStore.importJson(text, replace)
+                _state.update {
+                    it.copy(message = "导入完成：共 ${result.total} 个，新增 ${result.added} 个")
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(message = "导入失败：${e.message ?: "文件格式不正确"}")
+                }
+            }
+        }
+    }
+
+    fun consumeMessage() {
+        _state.update { it.copy(message = null) }
+    }
+}

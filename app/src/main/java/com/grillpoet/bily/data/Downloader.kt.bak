@@ -1,0 +1,90 @@
+package com.grillpoet.bily.data
+
+import android.app.DownloadManager
+import android.content.Context
+import android.os.Build
+import android.os.Environment
+import androidx.core.net.toUri
+import com.grillpoet.bily.core.Constants
+import com.grillpoet.bily.core.net.PersistentCookieJar
+
+class Downloader(
+    private val context: Context,
+    private val cookieJar: PersistentCookieJar
+) {
+
+    /**
+     * @param bvid        视频 BV 号
+     * @param title       视频标题
+     * @param partName    分P 名称（P1 时为 part 名，单P 时可为空）
+     * @param partIndex   分P 序号（从 1 开始）
+     * @param totalPages  总分P 数；>1 时文件名含 P 号
+     * @param url         直链
+     * @param qnName      清晰度名（720P / 360P）
+     */
+    fun enqueue(
+        bvid: String,
+        title: String,
+        partName: String,
+        partIndex: Int,
+        totalPages: Int,
+        url: String,
+        qnName: String
+    ) {
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val fileName = makeFileName(title, bvid, partName, partIndex, totalPages)
+
+        val description = if (totalPages > 1) {
+            "P$partIndex · $qnName · Bily"
+        } else {
+            "$qnName · Bily"
+        }
+
+        val request = DownloadManager.Request(url.toUri())
+            .setTitle(title)
+            .setDescription(description)
+            .applyVisibility()
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            .setMimeType("video/mp4")
+            .addRequestHeader("Referer", Constants.REFERER)
+            .addRequestHeader("User-Agent", Constants.USER_AGENT)
+            .addRequestHeader("Cookie", cookieJar.allAsHeader("bilibili.com"))
+
+        dm.enqueue(request)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun DownloadManager.Request.applyVisibility(): DownloadManager.Request =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            setNotificationVisibility(
+                DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+            )
+        } else {
+            setNotificationVisibility(
+                DownloadManager.Request.VISIBILITY_HIDDEN
+            )
+        }
+
+    private fun makeFileName(
+        title: String,
+        bvid: String,
+        partName: String,
+        partIndex: Int,
+        totalPages: Int
+    ): String {
+        val safeTitle = sanitize(title).take(50).ifBlank { "video" }
+
+        return if (totalPages > 1) {
+            val safePart = sanitize(partName.ifBlank { "P$partIndex" }).take(30)
+            "${safeTitle}_P${partIndex}_${safePart}_$bvid.mp4"
+        } else {
+            "${safeTitle}_$bvid.mp4"
+        }
+    }
+
+    /** 去掉文件系统非法字符，合并空白 */
+    private fun sanitize(s: String): String =
+        s.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+}
