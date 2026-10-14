@@ -2,71 +2,80 @@
 
 # Bily
 
-A third-party Bilibili client for Android, built with Kotlin and Jetpack Compose. It only does search, playback, download, and local favorites management — no ads, no recommendation feed, no social features. All data comes from Bilibili's public APIs.
-
-## Stack
-
-UI is Jetpack Compose with Material3, using unidirectional data flow and ViewModels for state. Playback is Media3 ExoPlayer, handling HLS and DASH streams, with `Player.Listener` for playback state changes. Networking is OkHttp with kotlinx.serialization for JSON, request and response models live under `data/`. Images load via Coil, local storage uses DataStore Preferences, and favorites are serialized to JSON before being stored. Dependencies are managed through a Gradle Version Catalog, and release builds enable R8 and resource shrinking.
-
-## Architecture
-
-The code is layered, roughly MVVM:
-
-    app/src/main/java/com/grillpoet/bily/
-    ├── core/        Constants and Kotlin extensions
-    ├── data/        API calls, download, favorites, data models
-    ├── di/          Dependency injection container
-    ├── nav/         Route definitions and navigation
-    ├── ui/
-    │   ├── screen/  Home, search, UP space, video player
-    │   ├── theme/   Theme and colors
-    │   ├── vm/      ViewModels
-    │   ├── widget/  Reusable components
-    │   └── icon/    Icons
-    ├── LibiApp.kt
-    └── MainActivity.kt
-
-Network calls are wrapped in the `data/` layer, ViewModels call into them and expose UI state, and the Compose layer only consumes that state. DI is a lightweight manual container — no Hilt or Koin.
+A third-party Bilibili client for Android, Kotlin + Jetpack Compose. Only does search, playback, download, and local favorites — no ads, no recommendations, no social. Data comes from Bilibili's public APIs.
 
 ## Features
 
 **Search and browsing**
-Keyword search hits Bilibili's search API, results load with pagination. The UP space page pulls a creator's uploads, also paginated.
+Keyword search for videos, plus creator (UP) pages with paginated uploads. Search goes through the WBI-signed web API; creator pages use the APP-signed cursor API.
 
 **Playback**
-Media3 ExoPlayer as the playback engine. Speed ranges from 0.5x to 2x via `PlaybackParameters`. Gesture seeking is handled through touch events on `PlayerView`. Fullscreen switching uses `Configuration` change listeners together with `WindowInsetsController`. Background audio runs through `MediaSessionService`, controllable from the notification.
+Media3 ExoPlayer as the engine, with a custom player UI. Gesture seeking, double-tap play/pause, 0.5x–2x speed. Fullscreen follows the video's actual aspect ratio and rotates between portrait and landscape; portrait videos take a separate fullscreen path. Multi-part videos are supported, and playback auto-advances to the next part.
 
 **Download**
-Two quality options: 720P and 360P. Download tasks run on coroutines over the IO dispatcher, issuing OkHttp requests and writing to the app's private directory. Progress is exposed to the UI via Flow. A foreground service keeps downloads alive when the app is backgrounded.
+720P and 360P. Queued through Android's DownloadManager, saved to the public Downloads directory. Filenames include the part number and BV ID to avoid collisions.
 
 **Favorites**
-Persisted with DataStore Preferences, serialized as JSON. The logic lives in `FavoriteStore.kt`. A video belongs to exactly one folder — favoriting removes it from its previous folder before inserting into the target one. Imports deduplicate automatically, with conflicts resolved by video ID.
+Stored in DataStore Preferences as JSON, organized into folders. A video belongs to exactly one folder — favoriting removes it from the previous one first. Import supports merge and replace modes, with global bvid deduplication.
+
+**Misc**
+Dark mode, Coil cover caching (RGB_565 halves memory), infinite grid that loads as you approach the bottom.
+
+## Networking
+
+Bilibili's APIs have a few layers of anti-scraping. All handled here:
+
+**WBI signing**
+Pull img_key and sub_key from the `nav` endpoint, derive a mixin_key through a fixed 64-slot permutation table, sort params, concatenate, and MD5 to get w_rid. Used by search and playurl.
+
+**APP signing**
+Hardcoded appkey/appsec, MD5 over sorted params. Used for APP-only endpoints like creator uploads.
+
+**Buvid fingerprint**
+Hit the `spi` endpoint to get buvid3/buvid4, write them into cookies, and pair them with a generated _uuid and b_lsid so requests look like a real browser.
+
+**Risk control**
+Detects codes -352/-402/-412/-799, and the case where `data` contains only `v_voucher`, and throws a dedicated RateLimited exception. The UI shows a "too many requests" message.
+
+**Throttling and retries**
+Each API category has its own throttle (playurl 200ms, search 500ms, creator 500ms) so they don't block each other. RetryInterceptor does exponential backoff on 412/429, up to two retries, with jitter.
+
+**TLS fingerprint**
+OkHttp is configured with Chrome's cipher suites and TLS 1.3/1.2 to slip past TLS fingerprinting.
+
+## Architecture
+
+MVVM with manual DI. `AppContainer` is initialized in Application and holds OkHttp, cookie jar, APIs, repositories, and Downloader. ViewModels get their dependencies through `AppViewModelFactory`. Navigation is a hand-written `Navigator` backed by a `mutableStateListOf<Screen>` stack, capped at 20 entries, with adjacent duplicates ignored.
+
+    app/src/main/java/com/grillpoet/bily/
+    ├── core/       Constants and extensions
+    ├── core/net/   CookieJar, interceptors, Call.await
+    ├── data/       Repositories, Downloader, FavoriteStore, models
+    ├── data/api/   API layer, DTOs, WBI/APP signing, Buvid
+    ├── di/         AppContainer
+    ├── nav/        Navigator and Screen
+    ├── ui/         AppRoot, theme, icons
+    ├── ui/screen/  Main, search, creator, video player
+    ├── ui/vm/      ViewModels
+    └── ui/widget/  Player, cards, dialogs, infinite scroll
 
 ## Building
 
-JDK 17, any recent stable Android Studio. Min SDK 26, target 35, compile 36.
+JDK 17, any recent stable Android Studio. minSdk 26, targetSdk 35, compileSdk 36.
 
     git clone https://github.com/grillpoet/bily.git
     cd bily
     ./gradlew assembleDebug
 
-Output is at `app/build/outputs/apk/debug/app-debug.apk`. Release builds enable R8 and resource shrinking and require a signing config.
+APK at `app/build/outputs/apk/debug/app-debug.apk`. Release builds enable R8 and resource shrinking and need a signing config.
 
 ## Permissions
 
-INTERNET for network requests. On Android 10 and above, writing to the app's private directory needs no storage permission; exporting to the gallery does require a media permission. Background downloads use FOREGROUND_SERVICE.
-
-## Downloads and favorites
-
-Downloaded videos live in the app's private directory and can be viewed from the in-app "My Downloads" page. Favorites are stored locally via DataStore as JSON and are not synced to any cloud. Export regularly if you want a backup — useful when switching devices or reinstalling.
+INTERNET for all network calls. POST_NOTIFICATIONS on Android 13+ for DownloadManager completion notifications.
 
 ## FAQ
 
-If search or playback fails, check your network first. Bilibili API changes can break individual features; wait for an update. Only 720P and 360P are available because the API returns limited formats when not logged in, and the priority is keeping the core features stable.
-
-## Contributing
-
-Issues and PRs are welcome. For bug reports, include reproduction steps, device model, and Android version.
+If search or playback fails, check your network first. Bilibili API changes can break individual features; wait for an update. Only 720P and 360P are available because the API returns limited formats when not logged in. Favorites are local-only and not synced — export regularly if you want a backup.
 
 ## License
 
