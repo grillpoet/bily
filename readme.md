@@ -1,75 +1,73 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 # Bily
 
-B 站第三方 Android 客户端，基于 Kotlin 和 Jetpack Compose 构建。仅保留搜索、播放、下载和本地收藏夹管理，不包含广告、推荐流和社交模块，所有数据通过 B 站公开接口获取。
+A third-party Bilibili client for Android, built with Kotlin and Jetpack Compose. It only does search, playback, download, and local favorites management — no ads, no recommendation feed, no social features. All data comes from Bilibili's public APIs.
 
-## 技术栈
+## Stack
 
-UI 层用 Jetpack Compose + Material3，单向数据流配合 ViewModel 管理状态。播放内核是 Media3 ExoPlayer，支持 HLS 和 DASH 流，通过 `Player.Listener` 监听播放状态变化。网络层用 OkHttp，配合 kotlinx.serialization 做 JSON 解析，请求和响应模型定义在 `data/` 下。图片加载用 Coil，本地存储走 DataStore Preferences，收藏夹序列化为 JSON 后存储。依赖管理通过 Gradle Version Catalog，构建配置开了 R8 混淆和资源压缩。
+UI is Jetpack Compose with Material3, using unidirectional data flow and ViewModels for state. Playback is Media3 ExoPlayer, handling HLS and DASH streams, with `Player.Listener` for playback state changes. Networking is OkHttp with kotlinx.serialization for JSON, request and response models live under `data/`. Images load via Coil, local storage uses DataStore Preferences, and favorites are serialized to JSON before being stored. Dependencies are managed through a Gradle Version Catalog, and release builds enable R8 and resource shrinking.
 
-## 架构
+## Architecture
 
-代码按分层组织，整体是 MVVM 结构：
+The code is layered, roughly MVVM:
 
-```
-app/src/main/java/com/grillpoet/bily/
-├── core/        常量和 Kotlin 扩展函数
-├── data/        API 请求、下载、收藏夹、数据模型
-├── di/          依赖注入容器
-├── nav/         路由定义和跳转逻辑
-├── ui/
-│   ├── screen/  主页、搜索、UP 空间、视频播放
-│   ├── theme/   主题和颜色
-│   ├── vm/      ViewModel
-│   ├── widget/  复用组件
-│   └── icon/    图标
-├── LibiApp.kt
-└── MainActivity.kt
-```
+    app/src/main/java/com/grillpoet/bily/
+    ├── core/        Constants and Kotlin extensions
+    ├── data/        API calls, download, favorites, data models
+    ├── di/          Dependency injection container
+    ├── nav/         Route definitions and navigation
+    ├── ui/
+    │   ├── screen/  Home, search, UP space, video player
+    │   ├── theme/   Theme and colors
+    │   ├── vm/      ViewModels
+    │   ├── widget/  Reusable components
+    │   └── icon/    Icons
+    ├── LibiApp.kt
+    └── MainActivity.kt
 
-网络请求在 `data/` 层封装，ViewModel 负责调用并暴露 UI state，Compose 层只消费状态。DI 用轻量的手动容器，没有引入 Hilt 或 Koin。
+Network calls are wrapped in the `data/` layer, ViewModels call into them and expose UI state, and the Compose layer only consumes that state. DI is a lightweight manual container — no Hilt or Koin.
 
-## 功能实现
+## Features
 
-**搜索与浏览**
-关键词搜索走 B 站搜索接口，结果分页加载。UP 主空间页拉取投稿列表，同样分页。
+**Search and browsing**
+Keyword search hits Bilibili's search API, results load with pagination. The UP space page pulls a creator's uploads, also paginated.
 
-**播放**
-Media3 ExoPlayer 作为播放内核。倍速范围 0.5x 到 2x，通过 `PlaybackParameters` 设置。手势快进快退基于 `PlayerView` 的触摸事件处理。全屏切换用 `Configuration` 变化监听配合 `WindowInsetsController`。音频后台播放通过 `MediaSessionService` 实现，通知栏可控。
+**Playback**
+Media3 ExoPlayer as the playback engine. Speed ranges from 0.5x to 2x via `PlaybackParameters`. Gesture seeking is handled through touch events on `PlayerView`. Fullscreen switching uses `Configuration` change listeners together with `WindowInsetsController`. Background audio runs through `MediaSessionService`, controllable from the notification.
 
-**下载**
-支持 720P 和 360P 两档清晰度。下载任务用协程在 IO 调度器上执行，通过 OkHttp 发起请求，写入应用私有目录。下载进度通过 Flow 暴露给 UI。前台服务保证后台下载不被系统回收。
+**Download**
+Two quality options: 720P and 360P. Download tasks run on coroutines over the IO dispatcher, issuing OkHttp requests and writing to the app's private directory. Progress is exposed to the UI via Flow. A foreground service keeps downloads alive when the app is backgrounded.
 
-**收藏夹**
-数据用 DataStore Preferences 持久化，序列化为 JSON。相关逻辑集中在 `FavoriteStore.kt`。一个视频只归属一个文件夹，收藏时先从原文件夹移除再插入目标文件夹。导入时自动去重，冲突处理按视频 ID 判断。
+**Favorites**
+Persisted with DataStore Preferences, serialized as JSON. The logic lives in `FavoriteStore.kt`. A video belongs to exactly one folder — favoriting removes it from its previous folder before inserting into the target one. Imports deduplicate automatically, with conflicts resolved by video ID.
 
-## 构建
+## Building
 
-JDK 17，Android Studio 最近几个稳定版均可。SDK 最低 26，目标 35，编译 36。
+JDK 17, any recent stable Android Studio. Min SDK 26, target 35, compile 36.
 
-```
-git clone https://github.com/grillpoet/bily.git
-cd bily
-./gradlew assembleDebug
-```
+    git clone https://github.com/grillpoet/bily.git
+    cd bily
+    ./gradlew assembleDebug
 
-输出在 `app/build/outputs/apk/debug/app-debug.apk`。Release 构建启用了 R8 混淆和资源压缩，需要配置签名文件。
+Output is at `app/build/outputs/apk/debug/app-debug.apk`. Release builds enable R8 and resource shrinking and require a signing config.
 
-## 权限
+## Permissions
 
-INTERNET 用于网络请求，Android 10 以上存应用私有目录无需存储权限，导出到相册才需要申请媒体权限。后台下载使用 FOREGROUND_SERVICE。
+INTERNET for network requests. On Android 10 and above, writing to the app's private directory needs no storage permission; exporting to the gallery does require a media permission. Background downloads use FOREGROUND_SERVICE.
 
-## 下载和收藏夹
+## Downloads and favorites
 
-下载的视频存放在应用私有目录，应用内“我的下载”页面可查看。收藏夹数据用 DataStore 存在本地，JSON 格式，不同步云端。建议定期导出备份，换设备或重装时可用。
+Downloaded videos live in the app's private directory and can be viewed from the in-app "My Downloads" page. Favorites are stored locally via DataStore as JSON and are not synced to any cloud. Export regularly if you want a backup — useful when switching devices or reinstalling.
 
-## 常见问题
+## FAQ
 
-搜不了或播不了先检查网络，B 站接口变动会导致部分功能失效，等更新即可。清晰度只有 720P 和 360P 是因为未登录状态下接口返回的格式有限，优先保证核心功能稳定。
+If search or playback fails, check your network first. Bilibili API changes can break individual features; wait for an update. Only 720P and 360P are available because the API returns limited formats when not logged in, and the priority is keeping the core features stable.
 
-## 贡献
+## Contributing
 
-提 Issue 或 PR 均可，报 Bug 请附上复现步骤、机型和 Android 版本。
+Issues and PRs are welcome. For bug reports, include reproduction steps, device model, and Android version.
 
-## 许可证
+## License
 
 MIT
